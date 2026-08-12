@@ -3,10 +3,25 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 
 	"github.com/coder/websocket"
+)
+
+type Command struct {
+	kind     CommandKind
+	name     string
+	password string
+	cell     int
+}
+
+type CommandKind string
+
+const (
+	Create CommandKind = "Create"
+	Join   CommandKind = "Join"
 )
 
 func main() {
@@ -29,6 +44,7 @@ func main() {
 
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
-		conn.Write(ctx, websocket.MessageText, []byte(scanner.Text()))
+		command, _ := json.Marshal(Command{kind: Create, name: "testroom", password: "1234", cell: 1})
+		conn.Write(ctx, websocket.MessageText, []byte(command))
 	}
 }
