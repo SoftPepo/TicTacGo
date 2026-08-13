@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 
 	"github.com/coder/websocket"
@@ -20,8 +19,6 @@ type Client struct {
 type Hub struct {
 	clients    map[*Client]bool
 	boards     map[string]*Board
-	register   chan *Client
-	unregister chan *Client
 	command    chan Command
 	closeBoard chan *Board
 }
@@ -54,8 +51,10 @@ type Command struct {
 type CommandKind string
 
 const (
-	Create CommandKind = "Create"
-	Join   CommandKind = "Join"
+	Register   CommandKind = "Register"
+	Unregister CommandKind = "Unregister"
+	Create     CommandKind = "Create"
+	Join       CommandKind = "Join"
 )
 
 type Response struct {
@@ -113,13 +112,14 @@ const (
 
 type ClientMsg struct {
 	Kind     string `json:"kind"`
-	Name     string `json:"name"`
+	Nick     string `json:"nick"`
+	RoomName string `json:"room_name"`
 	Password string `json:"password"`
 	Cell     int    `json:"cell"`
 }
 
 func (c *Client) readPump(ctx context.Context) {
-	defer func() { c.hub.unregister <- c }()
+	defer func() { c.hub.command <- Command{kind: Unregister, client: c} }()
 	for {
 		_, data, err := c.conn.Read(ctx)
 		if err != nil {
@@ -127,7 +127,6 @@ func (c *Client) readPump(ctx context.Context) {
 		}
 		var msg ClientMsg
 		err = json.Unmarshal(data, &msg)
-		fmt.Println(msg.Name)
 	}
 }
 
@@ -141,31 +140,47 @@ func (c *Client) writePump(ctx context.Context) {
 	}
 }
 
+func (h *Hub) run() {
+	for {
+		cmd := <-h.command
+		switch cmd.kind {
+		case Register:
+			h.clients[cmd.client] = true
+		case Unregister:
+			delete(h.clients, cmd.client)
+		}
+	}
+}
+
 func handleWS(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return
 	}
 	ctx := context.Background()
-
+	var msg ClientMsg
+	_, nick, err := conn.Read(ctx)
+	err = json.Unmarshal(nick, &msg)
 	c := &Client{
 		conn: conn,
 		send: make(chan string),
-		nick: "Anon",
+		nick: msg.Nick,
 		hub:  hub,
 	}
 
+	c.hub.command <- Command{client: c}
 	c.readPump(ctx)
 }
 
 func main() {
 	hub := &Hub{
 		clients:    make(map[*Client]bool),
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
+		boards:     make(map[string]*Board),
 		command:    make(chan Command),
 		closeBoard: make(chan *Board),
 	}
+
+	go hub.run()
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		handleWS(hub, w, r)
