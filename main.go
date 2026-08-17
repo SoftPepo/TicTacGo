@@ -17,15 +17,13 @@ type Client struct {
 }
 
 type Hub struct {
-	clients    map[*Client]bool
-	boards     map[string]*Board
-	command    chan Command
-	closeBoard chan *Board
+	clients map[*Client]bool
+	boards  map[string]*Board
+	command chan Command
 }
 
 type Board struct {
-	playerA   *Client
-	playerB   *Client
+	players   [2]*Client
 	name      string
 	password  string
 	gameState GameState
@@ -43,6 +41,7 @@ type GameState struct {
 type Command struct {
 	kind     CommandKind
 	client   *Client
+	board    *Board
 	name     string
 	password string
 	reply    chan Response
@@ -55,6 +54,7 @@ const (
 	Unregister CommandKind = "Unregister"
 	Create     CommandKind = "Create"
 	Join       CommandKind = "Join"
+	CloseBoard CommandKind = "CloseBoard"
 )
 
 type Response struct {
@@ -148,6 +148,29 @@ func (h *Hub) run() {
 			h.clients[cmd.client] = true
 		case Unregister:
 			delete(h.clients, cmd.client)
+		case Create:
+			if _, ok := h.boards[cmd.name]; !ok {
+				h.boards[cmd.name] = &Board{
+					name:     cmd.name,
+					password: cmd.password,
+					done:     make(chan struct{}),
+				}
+				cmd.reply <- Response{ok: true, board: h.boards[cmd.name]}
+			}
+		case Join:
+			if board, ok := h.boards[cmd.name]; !ok {
+				cmd.reply <- Response{ok: false, code: "no_such_room", msg: "This room does not exist"}
+			} else if board.password != cmd.password {
+				cmd.reply <- Response{ok: false, code: "wrong_password", msg: "Invalid room password"}
+			} else if board.players[1] != nil {
+				cmd.reply <- Response{ok: false, code: "room_full", msg: "This room is full"}
+			} else {
+				cmd.reply <- Response{ok: true, board: board}
+			}
+		case CloseBoard:
+			if h.boards[cmd.name] == cmd.board {
+				delete(h.boards, cmd.name)
+			}
 		}
 	}
 }
@@ -174,10 +197,9 @@ func handleWS(hub *Hub, w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	hub := &Hub{
-		clients:    make(map[*Client]bool),
-		boards:     make(map[string]*Board),
-		command:    make(chan Command),
-		closeBoard: make(chan *Board),
+		clients: make(map[*Client]bool),
+		boards:  make(map[string]*Board),
+		command: make(chan Command),
 	}
 
 	go hub.run()
