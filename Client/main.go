@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -12,11 +13,11 @@ import (
 )
 
 type ClientMsg struct {
-	kind     Kind
-	nick     string
-	roomName string
-	password string
-	cell     string
+	Kind     Kind
+	Nick     string
+	RoomName string
+	Password string
+	Cell     string
 }
 
 type Client struct {
@@ -40,7 +41,7 @@ func main() {
 	scanner := bufio.NewScanner(os.Stdin)
 	fmt.Println("Input your nickname: ")
 	scanner.Scan()
-	nick, _ := json.Marshal(ClientMsg{kind: Hello, nick: scanner.Text()})
+	nick, _ := json.Marshal(ClientMsg{Kind: Hello, Nick: scanner.Text()})
 
 	ctx := context.Background()
 	conn, _, err := websocket.Dial(ctx, "ws://localhost:8080/ws", nil)
@@ -70,36 +71,37 @@ func main() {
 				fmt.Println("Invalid format, Create <Room> <Password>")
 				continue
 			}
-			msg = ClientMsg{kind: Create, roomName: input[1], password: input[2]}
+			msg = ClientMsg{Kind: Create, RoomName: input[1], Password: input[2]}
 		case "Join":
 			if len(input) != 3 {
 				fmt.Println("Invalid format, Join <Room> <Password>")
 				continue
 			}
-			msg = ClientMsg{kind: Join, roomName: input[1], password: input[2]}
+			msg = ClientMsg{Kind: Join, RoomName: input[1], Password: input[2]}
 		case "Move":
 			if len(input) != 3 {
 				fmt.Println("Invalid format, Move <Cell>")
 				continue
 			}
-			msg = ClientMsg{kind: Move, cell: input[1]}
+			msg = ClientMsg{Kind: Move, Cell: input[1]}
 		case "Leave":
 			if len(input) != 1 {
 				fmt.Println("Leave command takes no parameters")
 				continue
 			}
-			msg = ClientMsg{kind: Leave}
+			msg = ClientMsg{Kind: Leave}
 		case "Exit":
 			if len(input) != 1 {
 				fmt.Println("Exit command takes no parameters")
 				continue
 			}
-			msg = ClientMsg{kind: Exit}
+			msg = ClientMsg{Kind: Exit}
 		default:
 			fmt.Println("Unknown command")
 			continue
 		}
 		data, _ := json.Marshal(msg)
 		conn.Write(ctx, websocket.MessageText, []byte(data))
+		slog.Info("Message sent", "Kind", msg.Kind)
 	}
 }

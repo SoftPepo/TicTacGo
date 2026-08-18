@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/coder/websocket"
@@ -10,7 +12,7 @@ import (
 
 type Client struct {
 	conn  *websocket.Conn
-	send  chan string
+	send  chan []byte
 	nick  string
 	hub   *Hub
 	board *Board
@@ -87,7 +89,6 @@ const (
 type Status string
 
 const (
-	Waiting  Status = "Waiting"
 	Ongoing  Status = "Ongoing"
 	Finished Status = "Finished"
 	Aborted  Status = "Aborted"
@@ -127,6 +128,19 @@ func (c *Client) readPump(ctx context.Context) {
 		}
 		var msg ClientMsg
 		err = json.Unmarshal(data, &msg)
+		slog.Info("Message received", "Kind", msg.Kind)
+		switch msg.Kind {
+		case "Create", "Join":
+			fmt.Println("Lmao")
+			reply := make(chan Response, 1)
+			command := Command{kind: CommandKind(msg.Kind), client: c, name: msg.RoomName, password: msg.Password, reply: reply}
+			c.hub.command <- command
+			resp := <-reply
+			if !resp.ok {
+				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: resp.code, Msg: resp.msg})
+				c.send <- ack
+			}
+		}
 	}
 }
 
@@ -146,6 +160,7 @@ func (h *Hub) run() {
 		switch cmd.kind {
 		case Register:
 			h.clients[cmd.client] = true
+			slog.Info("User registered")
 		case Unregister:
 			delete(h.clients, cmd.client)
 		case Create:
@@ -155,7 +170,9 @@ func (h *Hub) run() {
 					password: cmd.password,
 					done:     make(chan struct{}),
 				}
+				h.boards[cmd.name].players[0] = cmd.client
 				cmd.reply <- Response{ok: true, board: h.boards[cmd.name]}
+				slog.Info("Room created", "name", cmd.name)
 			}
 		case Join:
 			if board, ok := h.boards[cmd.name]; !ok {
@@ -165,6 +182,7 @@ func (h *Hub) run() {
 			} else if board.players[1] != nil {
 				cmd.reply <- Response{ok: false, code: "room_full", msg: "This room is full"}
 			} else {
+				board.players[1] = cmd.client
 				cmd.reply <- Response{ok: true, board: board}
 			}
 		case CloseBoard:
@@ -186,12 +204,12 @@ func handleWS(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	err = json.Unmarshal(nick, &msg)
 	c := &Client{
 		conn: conn,
-		send: make(chan string),
+		send: make(chan []byte, 16),
 		nick: msg.Nick,
 		hub:  hub,
 	}
 
-	c.hub.command <- Command{client: c}
+	c.hub.command <- Command{kind: Register, client: c}
 	c.readPump(ctx)
 }
 
