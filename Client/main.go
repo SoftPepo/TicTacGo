@@ -7,17 +7,18 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/coder/websocket"
 )
 
 type ClientMsg struct {
-	Kind     Kind
-	Nick     string
-	RoomName string
-	Password string
-	Cell     string
+	Kind     Kind   `json:"kind"`
+	Nick     string `json:"nick"`
+	RoomName string `json:"room_name"`
+	Password string `json:"password"`
+	Cell     int    `json:"cell"`
 }
 
 type Client struct {
@@ -36,6 +37,13 @@ const (
 	Leave  Kind = "Leave"
 	Exit   Kind = "Exit"
 )
+
+type Ack struct {
+	Kind string `json:"kind"`
+	Ok   bool   `json:"ok"`
+	Code string `json:"code"`
+	Msg  string `json:"msg"`
+}
 
 func main() {
 	scanner := bufio.NewScanner(os.Stdin)
@@ -56,7 +64,14 @@ func main() {
 		for {
 			_, data, err := conn.Read(ctx)
 			if err != nil {
-				return
+				slog.Error("Connection read error")
+				continue
+			}
+			var ack Ack
+			err = json.Unmarshal(data, &ack)
+			if err != nil {
+				slog.Error("Inbound json conversion error")
+				continue
 			}
 			fmt.Println(string(data))
 		}
@@ -65,6 +80,10 @@ func main() {
 	for scanner.Scan() {
 		var msg ClientMsg
 		input := strings.Fields(scanner.Text())
+		if len(input) == 0 {
+			fmt.Println("Please input a command: ")
+			continue
+		}
 		switch input[0] {
 		case "Create":
 			if len(input) != 3 {
@@ -79,11 +98,16 @@ func main() {
 			}
 			msg = ClientMsg{Kind: Join, RoomName: input[1], Password: input[2]}
 		case "Move":
-			if len(input) != 3 {
+			if len(input) != 2 {
 				fmt.Println("Invalid format, Move <Cell>")
 				continue
 			}
-			msg = ClientMsg{Kind: Move, Cell: input[1]}
+			cell, err := strconv.Atoi(input[1])
+			if input[0] == "Move" && err != nil {
+				fmt.Println("Cell number should be a number")
+				continue
+			}
+			msg = ClientMsg{Kind: Move, Cell: cell}
 		case "Leave":
 			if len(input) != 1 {
 				fmt.Println("Leave command takes no parameters")

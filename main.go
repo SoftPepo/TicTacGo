@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -131,10 +130,22 @@ func (c *Client) readPump(ctx context.Context) {
 		slog.Info("Message received", "Kind", msg.Kind)
 		switch msg.Kind {
 		case "Create", "Join":
-			fmt.Println("Lmao")
 			reply := make(chan Response, 1)
-			command := Command{kind: CommandKind(msg.Kind), client: c, name: msg.RoomName, password: msg.Password, reply: reply}
-			c.hub.command <- command
+			cmd := Command{kind: CommandKind(msg.Kind), client: c, name: msg.RoomName, password: msg.Password, reply: reply}
+			c.hub.command <- cmd
+			resp := <-reply
+			if !resp.ok {
+				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: resp.code, Msg: resp.msg})
+				c.send <- ack
+			}
+		case "Move":
+			if c.board == nil {
+				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "no_board", Msg: "You have not joined a board yet"})
+				c.send <- ack
+			}
+			reply := make(chan Response, 1)
+			gamecmd := GameCommand{kind: Move, client: c, cell: msg.Cell}
+			c.board.command <- gamecmd
 			resp := <-reply
 			if !resp.ok {
 				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: resp.code, Msg: resp.msg})
@@ -210,6 +221,7 @@ func handleWS(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	}
 
 	c.hub.command <- Command{kind: Register, client: c}
+	go c.writePump(ctx)
 	c.readPump(ctx)
 }
 
