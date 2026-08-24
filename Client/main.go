@@ -39,10 +39,14 @@ const (
 )
 
 type Ack struct {
-	Kind string `json:"kind"`
-	Ok   bool   `json:"ok"`
-	Code string `json:"code"`
-	Msg  string `json:"msg"`
+	Kind       string    `json:"kind"`
+	Ok         bool      `json:"ok"`
+	Code       string    `json:"code"`
+	Msg        string    `json:"msg"`
+	BoardState [9]string `json:"board_state"`
+	CurrentIdx int       `json:"current_idx"`
+	Status     string    `json:"status"`
+	Result     string    `json:"result"`
 }
 
 func main() {
@@ -65,7 +69,7 @@ func main() {
 			_, data, err := conn.Read(ctx)
 			if err != nil {
 				slog.Error("Connection read error")
-				continue
+				return
 			}
 			var ack Ack
 			err = json.Unmarshal(data, &ack)
@@ -73,7 +77,19 @@ func main() {
 				slog.Error("Inbound json conversion error")
 				continue
 			}
-			fmt.Println(string(data))
+			switch ack.Kind {
+			case "Gamestate":
+				emptyStringToSpace(ack.BoardState[:])
+				printBoard(ack.BoardState[:])
+				if ack.Status == "Finished" {
+					fmt.Println("Game is Finished," + ack.Result + " Won")
+				} else if ack.Status == "Aborted" {
+					fmt.Println("Game has been aborted")
+				}
+
+			case "Ack":
+				fmt.Println(ack.Msg)
+			}
 		}
 	}()
 
@@ -127,5 +143,19 @@ func main() {
 		data, _ := json.Marshal(msg)
 		conn.Write(ctx, websocket.MessageText, []byte(data))
 		slog.Info("Message sent", "Kind", msg.Kind)
+	}
+}
+
+func emptyStringToSpace(table []string) {
+	for i := range table {
+		if table[i] == "" {
+			table[i] = " "
+		}
+	}
+}
+
+func printBoard(board []string) {
+	for i := 0; i < 9; i += 3 {
+		fmt.Printf("%s|%s|%s\n", board[i], board[i+1], board[i+2])
 	}
 }

@@ -34,10 +34,11 @@ type Board struct {
 }
 
 type GameState struct {
-	boardState [9]Cell
-	currentIdx int
-	status     Status
-	result     Cell
+	Kind       string  `json:"kind"`
+	BoardState [9]Cell `json:"board_state"`
+	CurrentIdx int     `json:"current_idx"`
+	Status     Status  `json:"status"`
+	Result     Cell    `json:"result"`
 }
 
 type Command struct {
@@ -143,17 +144,25 @@ func (c *Client) readPump(ctx context.Context) {
 			}
 		case "Move":
 			if c.board == nil {
-				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "no_board", Msg: "You have not joined a board yet"})
+				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "no_board_move", Msg: "You have not joined a board yet"})
 				c.send <- ack
 			}
-			reply := make(chan Response, 1)
-			gamecmd := GameCommand{kind: Move, client: c, cell: msg.Cell, reply: reply}
-			c.board.command <- gamecmd
-			resp := <-reply
-			if !resp.ok {
-				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: resp.code, Msg: resp.msg})
+			select {
+			case c.board.command <- GameCommand{kind: Move, client: c, cell: msg.Cell}:
+			case <-c.board.done:
+			}
+		case "Leave":
+			if c.board == nil {
+				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "no_board_leave", Msg: "You have not joined a board yet"})
 				c.send <- ack
 			}
+			select {
+			case c.board.command <- GameCommand{kind: Leave, client: c}:
+			case <-c.board.done:
+			}
+			c.board = nil
+			ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "board_left", Msg: "You have left the board"})
+			c.send <- ack
 		}
 	}
 }
@@ -229,36 +238,43 @@ func (h *Hub) playerInGame(c *Client) bool {
 }
 
 func (b *Board) run() {
+	defer close(b.done)
 	for {
 		cmd := <-b.command
 		slog.Info("Received game command ", "kind", cmd.kind)
 		switch cmd.kind {
 		case "Move":
 			if b.players[1] == nil {
-				cmd.reply <- Response{ok: false, code: "game_not_started", msg: "Game has not yet started"}
+				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "game_not_started", Msg: "Game has not yet started"})
+				cmd.client.send <- ack
 				continue
 			}
 			if cmd.cell < 0 || cmd.cell > 8 {
-				cmd.reply <- Response{ok: false, code: "invalid_cell", msg: "Cell our of range (0-8)"}
+				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "invalid_cell_number", Msg: "Cell our of range (0-8)"})
+				cmd.client.send <- ack
 				continue
 			}
-			if b.indexOf(cmd.client) != b.gameState.currentIdx {
-				cmd.reply <- Response{ok: false, code: "invalid_turn", msg: "This is not your turn"}
+			if b.indexOf(cmd.client) != b.gameState.CurrentIdx {
+				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "invalid_turn", Msg: "This is not your turn"})
+				cmd.client.send <- ack
 				continue
 			}
-			if b.gameState.boardState[cmd.cell] != "" {
-				cmd.reply <- Response{ok: false, code: "invalid_cell", msg: "This cell is not empty"}
+			if b.gameState.BoardState[cmd.cell] != "" {
+				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "invalid_cell", Msg: "This cell is not empty"})
+				cmd.client.send <- ack
 				continue
 			}
-			slog.Info("Making move", "Current inx", b.gameState.currentIdx, "Symbol", symbols[b.indexOf(cmd.client)])
-			b.gameState.boardState[cmd.cell] = symbols[b.indexOf(cmd.client)]
+			slog.Info("Making move", "Current inx", b.gameState.CurrentIdx, "Symbol", symbols[b.indexOf(cmd.client)])
+			b.gameState.BoardState[cmd.cell] = symbols[b.indexOf(cmd.client)]
 			fmt.Println(b.checkWinner())
 			if b.checkWinner() != Empty {
-				b.gameState.result = b.checkWinner()
-				cmd.reply <- Response{ok: false, code: "win", msg: "Game won"}
+				state, _ := json.Marshal(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState, Status: Finished, Result: b.checkWinner()})
+				cmd.client.send <- state
+				return
 			}
-			b.gameState.currentIdx = 1 - b.gameState.currentIdx
-			cmd.reply <- Response{ok: true}
+			b.gameState.CurrentIdx = 1 - b.gameState.CurrentIdx
+			state, _ := json.Marshal(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState, CurrentIdx: b.gameState.CurrentIdx})
+			cmd.client.send <- state
 		case "AddPlayer":
 			if b.players[0] == nil {
 				b.players[0] = cmd.client
@@ -285,9 +301,9 @@ func (b *Board) indexOf(c *Client) int {
 
 func (b *Board) checkWinner() Cell {
 	for _, line := range winLines {
-		x := b.gameState.boardState[line[0]]
-		y := b.gameState.boardState[line[1]]
-		z := b.gameState.boardState[line[2]]
+		x := b.gameState.BoardState[line[0]]
+		y := b.gameState.BoardState[line[1]]
+		z := b.gameState.BoardState[line[2]]
 		if x != Empty && x == y && y == z {
 			return x
 		}
