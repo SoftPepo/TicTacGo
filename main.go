@@ -268,13 +268,11 @@ func (b *Board) run() {
 			b.gameState.BoardState[cmd.cell] = symbols[b.indexOf(cmd.client)]
 			fmt.Println(b.checkWinner())
 			if b.checkWinner() != Empty {
-				state, _ := json.Marshal(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState, Status: Finished, Result: b.checkWinner()})
-				cmd.client.send <- state
+				b.broadcast(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState, Status: Finished, Result: b.checkWinner()})
 				return
 			}
 			b.gameState.CurrentIdx = 1 - b.gameState.CurrentIdx
-			state, _ := json.Marshal(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState, CurrentIdx: b.gameState.CurrentIdx})
-			cmd.client.send <- state
+			b.broadcast(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState, CurrentIdx: b.gameState.CurrentIdx})
 		case "AddPlayer":
 			if b.players[0] == nil {
 				b.players[0] = cmd.client
@@ -309,6 +307,15 @@ func (b *Board) checkWinner() Cell {
 		}
 	}
 	return Empty
+}
+
+func (b *Board) broadcast(v any) {
+	for _, c := range b.players {
+		if c != nil {
+			data, _ := json.Marshal(v)
+			c.send <- data
+		}
+	}
 }
 
 func handleWS(hub *Hub, w http.ResponseWriter, r *http.Request) {

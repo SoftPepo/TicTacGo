@@ -158,4 +158,5 @@ func printBoard(board []string) {
 	for i := 0; i < 9; i += 3 {
 		fmt.Printf("%s|%s|%s\n", board[i], board[i+1], board[i+2])
 	}
+	fmt.Println("=====")
 }
