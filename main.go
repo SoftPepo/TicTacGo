@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -16,6 +15,7 @@ type Client struct {
 	nick  string
 	hub   *Hub
 	board *Board
+	done  chan struct{}
 }
 
 type Hub struct {
@@ -25,6 +25,7 @@ type Hub struct {
 }
 
 type Board struct {
+	hub       *Hub
 	players   [2]*Client
 	name      string
 	password  string
@@ -121,7 +122,16 @@ var winLines = [8][3]int{
 var symbols = [2]Cell{X, O}
 
 func (c *Client) readPump(ctx context.Context) {
+	defer close(c.done)
 	defer func() { c.hub.command <- Command{kind: Unregister, client: c} }()
+	defer func() {
+		if c.board != nil {
+			select {
+			case c.board.command <- GameCommand{kind: Leave, client: c}:
+			case <-c.board.done:
+			}
+		}
+	}()
 	for {
 		_, data, err := c.conn.Read(ctx)
 		if err != nil {
@@ -146,22 +156,27 @@ func (c *Client) readPump(ctx context.Context) {
 			if c.board == nil {
 				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "no_board_move", Msg: "You have not joined a board yet"})
 				c.send <- ack
+				continue
 			}
 			select {
 			case c.board.command <- GameCommand{kind: Move, client: c, cell: msg.Cell}:
 			case <-c.board.done:
+				c.board = nil
+				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: true, Code: "game_over", Msg: "Gra się zakończyła"})
+				c.send <- ack
 			}
 		case "Leave":
 			if c.board == nil {
 				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "no_board_leave", Msg: "You have not joined a board yet"})
 				c.send <- ack
+				continue
 			}
 			select {
 			case c.board.command <- GameCommand{kind: Leave, client: c}:
 			case <-c.board.done:
 			}
 			c.board = nil
-			ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "board_left", Msg: "You have left the board"})
+			ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: true, Code: "board_left", Msg: "You have left the board"})
 			c.send <- ack
 		}
 	}
@@ -169,9 +184,14 @@ func (c *Client) readPump(ctx context.Context) {
 
 func (c *Client) writePump(ctx context.Context) {
 	defer c.conn.Close(websocket.StatusNormalClosure, "")
-	for msg := range c.send {
-		err := c.conn.Write(ctx, websocket.MessageText, []byte(msg))
-		if err != nil {
+	for {
+		select {
+		case msg := <-c.send:
+			err := c.conn.Write(ctx, websocket.MessageText, []byte(msg))
+			if err != nil {
+				return
+			}
+		case <-c.done:
 			return
 		}
 	}
@@ -194,6 +214,7 @@ func (h *Hub) run() {
 			}
 			if _, ok := h.boards[cmd.name]; !ok {
 				h.boards[cmd.name] = &Board{
+					hub:      h,
 					name:     cmd.name,
 					password: cmd.password,
 					command:  make(chan GameCommand, 16),
@@ -209,16 +230,14 @@ func (h *Hub) run() {
 		case Join:
 			if h.playerInGame(cmd.client) {
 				cmd.reply <- Response{ok: false, code: "player_in_game", msg: "Player already in game"}
-			}
-			if board, ok := h.boards[cmd.name]; !ok {
+			} else if board, ok := h.boards[cmd.name]; !ok {
 				cmd.reply <- Response{ok: false, code: "no_such_room", msg: "This room does not exist"}
 			} else if board.password != cmd.password {
 				cmd.reply <- Response{ok: false, code: "wrong_password", msg: "Invalid room password"}
 			} else if board.players[1] != nil {
 				cmd.reply <- Response{ok: false, code: "room_full", msg: "This room is full"}
 			} else {
-				board.players[1] = cmd.client
-				cmd.reply <- Response{ok: true, board: board}
+				h.boards[cmd.name].command <- GameCommand{kind: AddPlayer, client: cmd.client, reply: cmd.reply}
 			}
 		case CloseBoard:
 			if h.boards[cmd.name] == cmd.board {
@@ -239,11 +258,12 @@ func (h *Hub) playerInGame(c *Client) bool {
 
 func (b *Board) run() {
 	defer close(b.done)
+	defer func() { b.hub.command <- Command{kind: CloseBoard, name: b.name, board: b} }()
 	for {
 		cmd := <-b.command
 		slog.Info("Received game command ", "kind", cmd.kind)
 		switch cmd.kind {
-		case "Move":
+		case Move:
 			if b.players[1] == nil {
 				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "game_not_started", Msg: "Game has not yet started"})
 				cmd.client.send <- ack
@@ -259,30 +279,37 @@ func (b *Board) run() {
 				cmd.client.send <- ack
 				continue
 			}
-			if b.gameState.BoardState[cmd.cell] != "" {
+			if b.gameState.BoardState[cmd.cell] != Empty {
 				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "invalid_cell", Msg: "This cell is not empty"})
 				cmd.client.send <- ack
 				continue
 			}
 			slog.Info("Making move", "Current inx", b.gameState.CurrentIdx, "Symbol", symbols[b.indexOf(cmd.client)])
 			b.gameState.BoardState[cmd.cell] = symbols[b.indexOf(cmd.client)]
-			fmt.Println(b.checkWinner())
 			if b.checkWinner() != Empty {
 				b.broadcast(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState, Status: Finished, Result: b.checkWinner()})
 				return
+			} else if b.checkStalemate() {
+				b.broadcast(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState, Status: Finished, Result: Empty})
+				return
 			}
 			b.gameState.CurrentIdx = 1 - b.gameState.CurrentIdx
-			b.broadcast(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState, CurrentIdx: b.gameState.CurrentIdx})
-		case "AddPlayer":
+			b.broadcast(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState})
+			b.broadcast(Ack{Kind: "Ack", Code: "next_turn", Msg: b.players[b.gameState.CurrentIdx].nick + "'s turn"})
+		case AddPlayer:
 			if b.players[0] == nil {
 				b.players[0] = cmd.client
 				cmd.reply <- Response{ok: true, board: b}
 			} else if b.players[1] == nil {
 				b.players[1] = cmd.client
 				cmd.reply <- Response{ok: true, board: b}
+				b.broadcast(Ack{Kind: "Ack", Code: "game_started", Msg: "Game has started, " + b.players[0].nick + "'s turn"})
 			} else {
 				cmd.reply <- Response{ok: false, code: "room_full", msg: "Room you are  trying to join is full"}
 			}
+		case Leave:
+			b.broadcast(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState, Status: Aborted})
+			return
 		}
 	}
 }
@@ -309,6 +336,15 @@ func (b *Board) checkWinner() Cell {
 	return Empty
 }
 
+func (b *Board) checkStalemate() bool {
+	for _, cell := range b.gameState.BoardState {
+		if cell == Empty {
+			return false
+		}
+	}
+	return true
+}
+
 func (b *Board) broadcast(v any) {
 	for _, c := range b.players {
 		if c != nil {
@@ -332,6 +368,7 @@ func handleWS(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		send: make(chan []byte, 16),
 		nick: msg.Nick,
 		hub:  hub,
+		done: make(chan struct{}),
 	}
 
 	c.hub.command <- Command{kind: Register, client: c}

@@ -82,11 +82,14 @@ func main() {
 				emptyStringToSpace(ack.BoardState[:])
 				printBoard(ack.BoardState[:])
 				if ack.Status == "Finished" {
-					fmt.Println("Game is Finished," + ack.Result + " Won")
+					if ack.Result == "" {
+						fmt.Println("Game has finished in stalemate")
+					} else {
+						fmt.Println("Game is finished," + ack.Result + " Won")
+					}
 				} else if ack.Status == "Aborted" {
 					fmt.Println("Game has been aborted")
 				}
-
 			case "Ack":
 				fmt.Println(ack.Msg)
 			}
