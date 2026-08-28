@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/coder/websocket"
 )
@@ -31,6 +32,7 @@ type Board struct {
 	password  string
 	gameState GameState
 	command   chan GameCommand
+	timer     *time.Timer
 	done      chan struct{}
 }
 
@@ -259,57 +261,73 @@ func (h *Hub) playerInGame(c *Client) bool {
 func (b *Board) run() {
 	defer close(b.done)
 	defer func() { b.hub.command <- Command{kind: CloseBoard, name: b.name, board: b} }()
+	b.timer = time.NewTimer(time.Hour)
+	defer b.timer.Stop()
+
 	for {
-		cmd := <-b.command
-		slog.Info("Received game command ", "kind", cmd.kind)
-		switch cmd.kind {
-		case Move:
+		select {
+		case cmd := <-b.command:
+			slog.Info("Received game command ", "kind", cmd.kind)
+			switch cmd.kind {
+			case Move:
+				if b.players[1] == nil {
+					ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "game_not_started", Msg: "Game has not yet started"})
+					cmd.client.send <- ack
+					continue
+				}
+				if cmd.cell < 0 || cmd.cell > 8 {
+					ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "invalid_cell_number", Msg: "Cell our of range (0-8)"})
+					cmd.client.send <- ack
+					continue
+				}
+				if b.indexOf(cmd.client) != b.gameState.CurrentIdx {
+					ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "invalid_turn", Msg: "This is not your turn"})
+					cmd.client.send <- ack
+					continue
+				}
+				if b.gameState.BoardState[cmd.cell] != Empty {
+					ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "invalid_cell", Msg: "This cell is not empty"})
+					cmd.client.send <- ack
+					continue
+				}
+				slog.Info("Making move", "Current inx", b.gameState.CurrentIdx, "Symbol", symbols[b.indexOf(cmd.client)])
+				b.gameState.BoardState[cmd.cell] = symbols[b.indexOf(cmd.client)]
+				if b.checkWinner() != Empty {
+					b.broadcast(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState, Status: Finished, Result: b.checkWinner()})
+					return
+				} else if b.checkStalemate() {
+					b.broadcast(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState, Status: Finished, Result: Empty})
+					return
+				}
+				b.gameState.CurrentIdx = 1 - b.gameState.CurrentIdx
+				b.broadcast(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState})
+				b.broadcast(Ack{Kind: "Ack", Code: "next_turn", Msg: b.players[b.gameState.CurrentIdx].nick + "'s turn"})
+				b.timer.Reset(60 * time.Second)
+			case AddPlayer:
+				if b.players[0] == nil {
+					b.players[0] = cmd.client
+					cmd.reply <- Response{ok: true, board: b}
+				} else if b.players[1] == nil {
+					b.players[1] = cmd.client
+					cmd.reply <- Response{ok: true, board: b}
+					b.broadcast(Ack{Kind: "Ack", Code: "game_started", Msg: "Game has started, " + b.players[0].nick + "'s turn"})
+					b.timer.Reset(60 * time.Second)
+				} else {
+					cmd.reply <- Response{ok: false, code: "room_full", msg: "Room you are  trying to join is full"}
+				}
+			case Leave:
+				b.broadcast(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState, Status: Aborted})
+				return
+			}
+		case <-b.timer.C:
 			if b.players[1] == nil {
-				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "game_not_started", Msg: "Game has not yet started"})
-				cmd.client.send <- ack
-				continue
-			}
-			if cmd.cell < 0 || cmd.cell > 8 {
-				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "invalid_cell_number", Msg: "Cell our of range (0-8)"})
-				cmd.client.send <- ack
-				continue
-			}
-			if b.indexOf(cmd.client) != b.gameState.CurrentIdx {
-				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "invalid_turn", Msg: "This is not your turn"})
-				cmd.client.send <- ack
-				continue
-			}
-			if b.gameState.BoardState[cmd.cell] != Empty {
-				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "invalid_cell", Msg: "This cell is not empty"})
-				cmd.client.send <- ack
-				continue
-			}
-			slog.Info("Making move", "Current inx", b.gameState.CurrentIdx, "Symbol", symbols[b.indexOf(cmd.client)])
-			b.gameState.BoardState[cmd.cell] = symbols[b.indexOf(cmd.client)]
-			if b.checkWinner() != Empty {
-				b.broadcast(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState, Status: Finished, Result: b.checkWinner()})
+				b.broadcast(Ack{Kind: "Ack", Code: "board_timeout", Msg: "Board is inactive for an hour, closing the board"})
 				return
-			} else if b.checkStalemate() {
-				b.broadcast(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState, Status: Finished, Result: Empty})
-				return
-			}
-			b.gameState.CurrentIdx = 1 - b.gameState.CurrentIdx
-			b.broadcast(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState})
-			b.broadcast(Ack{Kind: "Ack", Code: "next_turn", Msg: b.players[b.gameState.CurrentIdx].nick + "'s turn"})
-		case AddPlayer:
-			if b.players[0] == nil {
-				b.players[0] = cmd.client
-				cmd.reply <- Response{ok: true, board: b}
-			} else if b.players[1] == nil {
-				b.players[1] = cmd.client
-				cmd.reply <- Response{ok: true, board: b}
-				b.broadcast(Ack{Kind: "Ack", Code: "game_started", Msg: "Game has started, " + b.players[0].nick + "'s turn"})
 			} else {
-				cmd.reply <- Response{ok: false, code: "room_full", msg: "Room you are  trying to join is full"}
+				b.broadcast(Ack{Kind: "Ack", Code: "player_timeout", Msg: b.players[b.gameState.CurrentIdx].nick + " lost by timeout"})
+				b.broadcast(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState, Status: Finished, Result: symbols[1-b.gameState.CurrentIdx]})
+				return
 			}
-		case Leave:
-			b.broadcast(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState, Status: Aborted})
-			return
 		}
 	}
 }
