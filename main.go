@@ -11,6 +11,13 @@ import (
 	"github.com/coder/websocket"
 )
 
+const (
+	moveTimeout = 60 * time.Second
+	roomTimeout = time.Hour
+	sendBuffer  = 16
+	cmdBuffer   = 16
+)
+
 type Client struct {
 	conn  *websocket.Conn
 	send  chan []byte
@@ -150,12 +157,11 @@ func (c *Client) readPump(ctx context.Context) {
 			cmd := Command{kind: CommandKind(msg.Kind), client: c, name: msg.RoomName, password: msg.Password, reply: reply}
 			c.hub.command <- cmd
 			resp := <-reply
-			if !resp.ok {
-				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: resp.code, Msg: resp.msg})
-				c.send <- ack
-			} else {
+			if resp.ok {
 				c.board = resp.board
 			}
+			ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: resp.ok, Code: resp.code, Msg: resp.msg})
+			c.send <- ack
 		case "Move":
 			if c.board == nil {
 				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "no_board_move", Msg: "You have not joined a board yet"})
@@ -166,7 +172,7 @@ func (c *Client) readPump(ctx context.Context) {
 			case c.board.command <- GameCommand{kind: Move, client: c, cell: msg.Cell}:
 			case <-c.board.done:
 				c.board = nil
-				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: true, Code: "game_over", Msg: "Gra się zakończyła"})
+				ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: true, Code: "game_over", Msg: "Game has ended"})
 				c.send <- ack
 			}
 		case "Leave":
@@ -221,7 +227,7 @@ func (h *Hub) run() {
 					hub:      h,
 					name:     cmd.name,
 					password: cmd.password,
-					command:  make(chan GameCommand, 16),
+					command:  make(chan GameCommand, cmdBuffer),
 					done:     make(chan struct{}),
 				}
 				go h.boards[cmd.name].run()
@@ -261,7 +267,7 @@ func (h *Hub) playerInGame(c *Client) bool {
 func (b *Board) run() {
 	defer close(b.done)
 	defer func() { b.hub.command <- Command{kind: CloseBoard, name: b.name, board: b} }()
-	b.timer = time.NewTimer(time.Hour)
+	b.timer = time.NewTimer(roomTimeout)
 	defer b.timer.Stop()
 
 	for {
@@ -301,21 +307,21 @@ func (b *Board) run() {
 				}
 				b.gameState.CurrentIdx = 1 - b.gameState.CurrentIdx
 				b.broadcast(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState})
-				b.broadcast(Ack{Kind: "Ack", Code: "next_turn", Msg: b.getPlayers()[b.gameState.CurrentIdx].nick + "'s turn"})
-				b.timer.Reset(60 * time.Second)
+				b.broadcast(Ack{Kind: "Ack", Ok: true, Code: "next_turn", Msg: b.getPlayers()[b.gameState.CurrentIdx].nick + "'s turn"})
+				b.timer.Reset(moveTimeout)
 			case AddPlayer:
 				if b.getPlayers()[0] == nil {
 					b.mu.Lock()
 					b.players[0] = cmd.client
 					b.mu.Unlock()
-					cmd.reply <- Response{ok: true, board: b}
+					cmd.reply <- Response{ok: true, board: b, code: "room_created", msg: "Room has been created"}
 				} else if b.getPlayers()[1] == nil {
 					b.mu.Lock()
 					b.players[1] = cmd.client
 					b.mu.Unlock()
-					cmd.reply <- Response{ok: true, board: b}
-					b.broadcast(Ack{Kind: "Ack", Code: "game_started", Msg: "Game has started, " + b.getPlayers()[0].nick + "'s turn"})
-					b.timer.Reset(60 * time.Second)
+					cmd.reply <- Response{ok: true, board: b, code: "room_joined", msg: "Joined room"}
+					b.broadcast(Ack{Kind: "Ack", Ok: true, Code: "game_started", Msg: "Game has started, " + b.getPlayers()[0].nick + "'s turn"})
+					b.timer.Reset(moveTimeout)
 				} else {
 					cmd.reply <- Response{ok: false, code: "room_full", msg: "Room you are  trying to join is full"}
 				}
@@ -325,10 +331,10 @@ func (b *Board) run() {
 			}
 		case <-b.timer.C:
 			if b.getPlayers()[1] == nil {
-				b.broadcast(Ack{Kind: "Ack", Code: "board_timeout", Msg: "Board is inactive for an hour, closing the board"})
+				b.broadcast(Ack{Kind: "Ack", Ok: true, Code: "board_timeout", Msg: "Board is inactive, closing the board"})
 				return
 			} else {
-				b.broadcast(Ack{Kind: "Ack", Code: "player_timeout", Msg: b.getPlayers()[b.gameState.CurrentIdx].nick + " lost by timeout"})
+				b.broadcast(Ack{Kind: "Ack", Ok: true, Code: "player_timeout", Msg: b.getPlayers()[b.gameState.CurrentIdx].nick + " lost by timeout"})
 				b.broadcast(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState, Status: Finished, Result: symbols[1-b.gameState.CurrentIdx]})
 				return
 			}
@@ -393,7 +399,7 @@ func handleWS(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	err = json.Unmarshal(nick, &msg)
 	c := &Client{
 		conn: conn,
-		send: make(chan []byte, 16),
+		send: make(chan []byte, sendBuffer),
 		nick: msg.Nick,
 		hub:  hub,
 		done: make(chan struct{}),
@@ -408,7 +414,7 @@ func main() {
 	hub := &Hub{
 		clients: make(map[*Client]bool),
 		boards:  make(map[string]*Board),
-		command: make(chan Command),
+		command: make(chan Command, cmdBuffer),
 	}
 
 	go hub.run()
