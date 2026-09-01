@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -26,6 +27,7 @@ type Hub struct {
 }
 
 type Board struct {
+	mu        sync.RWMutex
 	hub       *Hub
 	players   [2]*Client
 	name      string
@@ -270,7 +272,7 @@ func (b *Board) run() {
 			slog.Info("Received game command ", "kind", cmd.kind)
 			switch cmd.kind {
 			case Move:
-				if b.players[1] == nil {
+				if b.getPlayers()[1] == nil {
 					ack, _ := json.Marshal(Ack{Kind: "Ack", Ok: false, Code: "game_not_started", Msg: "Game has not yet started"})
 					cmd.client.send <- ack
 					continue
@@ -301,16 +303,20 @@ func (b *Board) run() {
 				}
 				b.gameState.CurrentIdx = 1 - b.gameState.CurrentIdx
 				b.broadcast(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState})
-				b.broadcast(Ack{Kind: "Ack", Code: "next_turn", Msg: b.players[b.gameState.CurrentIdx].nick + "'s turn"})
+				b.broadcast(Ack{Kind: "Ack", Code: "next_turn", Msg: b.getPlayers()[b.gameState.CurrentIdx].nick + "'s turn"})
 				b.timer.Reset(60 * time.Second)
 			case AddPlayer:
-				if b.players[0] == nil {
+				if b.getPlayers()[0] == nil {
+					b.mu.Lock()
 					b.players[0] = cmd.client
+					b.mu.Unlock()
 					cmd.reply <- Response{ok: true, board: b}
-				} else if b.players[1] == nil {
+				} else if b.getPlayers()[1] == nil {
+					b.mu.Lock()
 					b.players[1] = cmd.client
+					b.mu.Unlock()
 					cmd.reply <- Response{ok: true, board: b}
-					b.broadcast(Ack{Kind: "Ack", Code: "game_started", Msg: "Game has started, " + b.players[0].nick + "'s turn"})
+					b.broadcast(Ack{Kind: "Ack", Code: "game_started", Msg: "Game has started, " + b.getPlayers()[0].nick + "'s turn"})
 					b.timer.Reset(60 * time.Second)
 				} else {
 					cmd.reply <- Response{ok: false, code: "room_full", msg: "Room you are  trying to join is full"}
@@ -320,11 +326,11 @@ func (b *Board) run() {
 				return
 			}
 		case <-b.timer.C:
-			if b.players[1] == nil {
+			if b.getPlayers()[1] == nil {
 				b.broadcast(Ack{Kind: "Ack", Code: "board_timeout", Msg: "Board is inactive for an hour, closing the board"})
 				return
 			} else {
-				b.broadcast(Ack{Kind: "Ack", Code: "player_timeout", Msg: b.players[b.gameState.CurrentIdx].nick + " lost by timeout"})
+				b.broadcast(Ack{Kind: "Ack", Code: "player_timeout", Msg: b.getPlayers()[b.gameState.CurrentIdx].nick + " lost by timeout"})
 				b.broadcast(GameState{Kind: "Gamestate", BoardState: b.gameState.BoardState, Status: Finished, Result: symbols[1-b.gameState.CurrentIdx]})
 				return
 			}
@@ -333,9 +339,9 @@ func (b *Board) run() {
 }
 
 func (b *Board) indexOf(c *Client) int {
-	if b.players[0] == c {
+	if b.getPlayers()[0] == c {
 		return 0
-	} else if b.players[1] == c {
+	} else if b.getPlayers()[1] == c {
 		return 1
 	} else {
 		return -1
@@ -364,12 +370,18 @@ func (b *Board) checkStalemate() bool {
 }
 
 func (b *Board) broadcast(v any) {
-	for _, c := range b.players {
+	for _, c := range b.getPlayers() {
 		if c != nil {
 			data, _ := json.Marshal(v)
 			c.send <- data
 		}
 	}
+}
+
+func (b *Board) getPlayers() [2]*Client {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.players
 }
 
 func handleWS(hub *Hub, w http.ResponseWriter, r *http.Request) {
