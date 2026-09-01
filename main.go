@@ -238,8 +238,6 @@ func (h *Hub) run() {
 				cmd.reply <- Response{ok: false, code: "no_such_room", msg: "This room does not exist"}
 			} else if board.password != cmd.password {
 				cmd.reply <- Response{ok: false, code: "wrong_password", msg: "Invalid room password"}
-			} else if board.players[1] != nil {
-				cmd.reply <- Response{ok: false, code: "room_full", msg: "This room is full"}
 			} else {
 				h.boards[cmd.name].command <- GameCommand{kind: AddPlayer, client: cmd.client, reply: cmd.reply}
 			}
@@ -253,7 +251,7 @@ func (h *Hub) run() {
 
 func (h *Hub) playerInGame(c *Client) bool {
 	for _, board := range h.boards {
-		if board.players[0] == c || board.players[1] == c {
+		if board.getPlayers()[0] == c || board.getPlayers()[1] == c {
 			return true
 		}
 	}
